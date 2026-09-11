@@ -8,7 +8,7 @@ Usado para garantir a consistência de contratos entre os microserviços e APIs 
 ## Instalação
 
 ```bash
-go get github.com/instituto-libcom/go-api-core
+go get github.com/instituto-libcom/go-api-core@latest
 ```
 
 ## Exemplos de Uso
@@ -90,5 +90,64 @@ func DeleteUserHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Retornando a resposta padrão
 	response.Error(w, err.StatusCode, err.Code, err.Message)
+}
+```
+
+### 4. Gerenciamento de Lixeira (Soft Delete)
+
+O subpacote `softdelete` abstrai as regras de exclusão lógica e física, fornecendo campos padronizados e utilitários agnósticos que se integram facilmente a ORMs como GORM.
+
+**Incorporando os campos padrão (Entity/Model):**
+
+```go
+package model
+
+import "github.com/instituto-libcom/go-api-core/softdelete"
+
+type Product struct {
+	ID    uint   `gorm:"primaryKey"`
+	Name  string `json:"name"`
+	Price float64
+	
+	// Adiciona as colunas deleted, deleted_at e deleted_user_uuid
+	softdelete.Fields 
+}
+```
+
+**Exemplos de uso (com GORM):**
+
+```go
+package repository
+
+import (
+	"github.com/google/uuid"
+	"github.com/instituto-libcom/go-api-core/softdelete"
+	"gorm.io/gorm"
+)
+
+// Listar apenas ativos
+func ListActive(db *gorm.DB) ([]Product, error) {
+	var products []Product
+	err := db.Where(softdelete.NotDeleted()).Find(&products).Error
+	return products, err
+}
+
+// Listar lixeira
+func ListTrashed(db *gorm.DB) ([]Product, error) {
+	var products []Product
+	err := db.Where(softdelete.OnlyDeleted()).Find(&products).Error
+	return products, err
+}
+
+// Executar Soft Delete
+func SoftDelete(db *gorm.DB, productIDs []uint, userUUID uuid.UUID) error {
+	updates := softdelete.SoftDeleteData(userUUID)
+	return db.Model(&Product{}).Where("id IN ?", productIDs).Updates(updates).Error
+}
+
+// Restaurar da Lixeira
+func Restore(db *gorm.DB, productIDs []uint) error {
+	updates := softdelete.RestoreData()
+	return db.Model(&Product{}).Where("id IN ?", productIDs).Updates(updates).Error
 }
 ```
