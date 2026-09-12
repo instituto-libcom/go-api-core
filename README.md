@@ -151,3 +151,88 @@ func Restore(db *gorm.DB, productIDs []uint) error {
 	return db.Model(&Product{}).Where("id IN ?", productIDs).Updates(updates).Error
 }
 ```
+
+### 5. Motor de Busca Unificado (Query DSL)
+
+O subpacote `querydsl` interpreta o payload Query DSL (`query.bool.must/should/must_not`, `sort`, `page`, `size`) usado nas rotas `POST /:entity/query` e `POST /:entity/trash/query`. Ele é **agnóstico de ORM**: `Compile` recebe o payload e uma allowlist de campos e devolve um fragmento `WHERE` parametrizado (`?`), um fragmento `ORDER BY` e os valores normalizados de `LIMIT`/`OFFSET` — nunca toca em banco de dados ou em um ORM específico.
+
+**Payload aceito:**
+
+```json
+{
+  "query": {
+    "bool": {
+      "must": [{ "term": { "status": "ativo" } }],
+      "should": [],
+      "must_not": []
+    }
+  },
+  "sort": [{ "created_at": "desc" }],
+  "page": 0,
+  "size": 25
+}
+```
+
+Operadores suportados: `term` (igualdade), `terms` (IN), `match` (ILIKE parcial), `range` (`gt`/`gte`/`lt`/`lte`) e `exists` (IS NOT NULL). Campos com jsonb aceitam caminho com notação de ponto (ex.: `json_contacts.email.pessoal`).
+
+**Definindo a allowlist da entidade:**
+
+```go
+package client
+
+import "github.com/instituto-libcom/go-api-core/querydsl"
+
+var Fields = querydsl.FieldSet{
+	"name":       {Column: "name", Sortable: true},
+	"status":     {Column: "status"},
+	"created_at": {Column: "created_at", Sortable: true},
+	// campo jsonb: aceita "json_contacts.<caminho>" nas cláusulas
+	"json_contacts": {Column: "json_contacts", JSONPath: true},
+}
+```
+
+**Exemplo de uso (com GORM):**
+
+```go
+package handler
+
+import (
+	"net/http"
+
+	"github.com/instituto-libcom/go-api-core/apperror"
+	"github.com/instituto-libcom/go-api-core/querydsl"
+	"github.com/instituto-libcom/go-api-core/response"
+	"gorm.io/gorm"
+)
+
+func QueryClientsHandler(db *gorm.DB, w http.ResponseWriter, r *http.Request) {
+	var req querydsl.Request
+	// ... decodificar req a partir do corpo JSON da requisição ...
+
+	compiled, err := querydsl.Compile(req, client.Fields)
+	if err != nil {
+		appErr := apperror.NewBadRequest("BAD_REQUEST", err.Error())
+		response.Error(w, appErr.StatusCode, appErr.Code, appErr.Message)
+		return
+	}
+
+	query := db.Model(&Client{})
+	if compiled.Where != "" {
+		query = query.Where(compiled.Where, compiled.Args...)
+	}
+	if compiled.OrderBy != "" {
+		query = query.Order(compiled.OrderBy)
+	}
+
+	var total int64
+	query.Session(&gorm.Session{}).Count(&total)
+
+	var clients []Client
+	query.Limit(compiled.Limit).Offset(compiled.Offset).Find(&clients)
+
+	meta := pagination.Meta{Page: compiled.Page, Size: compiled.Size, TotalElements: int(total)}
+	response.Paginated(w, http.StatusOK, clients, meta)
+}
+```
+
+Como `Compile` só devolve fragmentos de SQL e valores, ele também é reutilizável fora do GORM (`database/sql`, `sqlx`, etc.) — basta aplicar `Where`/`Args`, `OrderBy`, `Limit` e `Offset` na camada de acesso a dados que a API já usa.
